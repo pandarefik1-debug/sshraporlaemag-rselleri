@@ -23,8 +23,9 @@ import {
   Pie,
   Cell,
   Legend,
+  LabelList,
 } from "recharts";
-import { UploadCloud, AlertCircle, Package, Wrench, RotateCcw, Download } from "lucide-react";
+import { UploadCloud, AlertCircle, Package, Wrench, RotateCcw, Download, ChevronDown, ChevronUp } from "lucide-react";
 
 // --- TİP TANIMLAMALARI ---
 interface ExcelRow {
@@ -45,10 +46,10 @@ interface FrequencyData {
   count: number;
 }
 
-interface CombinationData {
-  module: string;
-  part: string;
+interface ProductData {
+  product: string;
   count: number;
+  parts: { part: string; count: number }[];
 }
 
 // Recharts Grafik Renk Paleti (Kırmızı tonları)
@@ -60,6 +61,7 @@ export default function QualityDashboard() {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [reportTitle, setReportTitle] = useState<string>("Fabrika Kalite Dashboard");
   const dashboardRef = useRef<HTMLDivElement>(null);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState<boolean>(false);
   
   // Sunum State'leri
   const [presentationFiles, setPresentationFiles] = useState<File[]>([]);
@@ -69,7 +71,8 @@ export default function QualityDashboard() {
   const [totalRecords, setTotalRecords] = useState<number>(0);
   const [topModules, setTopModules] = useState<FrequencyData[]>([]);
   const [topParts, setTopParts] = useState<FrequencyData[]>([]);
-  const [topCombos, setTopCombos] = useState<CombinationData[]>([]);
+  const [topProducts, setTopProducts] = useState<ProductData[]>([]);
+  const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
 
   // --- CORE LOGIC: EXCEL OKUMA VE HESAPLAMA ---
   const processExcel = (buffer: ArrayBuffer) => {
@@ -128,16 +131,19 @@ export default function QualityDashboard() {
 
     const moduleCounts: Record<string, number> = {};
     const partCounts: Record<string, number> = {};
-    const comboCounts: Record<string, number> = {};
+    const productStats: Record<string, { count: number; parts: Record<string, number> }> = {};
 
     // Frekansları Hesapla
     data.forEach((item) => {
       moduleCounts[item.moduleName] = (moduleCounts[item.moduleName] || 0) + 1;
       partCounts[item.partDesc] = (partCounts[item.partDesc] || 0) + 1;
 
-      // Çapraz Kombinasyon için anahtar oluştur
-      const comboKey = `${item.moduleName} | ${item.partDesc}`;
-      comboCounts[comboKey] = (comboCounts[comboKey] || 0) + 1;
+      // Ürün (SSH MAMÜL TANIM) bazlı hesaplama
+      if (!productStats[item.productDesc]) {
+        productStats[item.productDesc] = { count: 0, parts: {} };
+      }
+      productStats[item.productDesc].count++;
+      productStats[item.productDesc].parts[item.partDesc] = (productStats[item.productDesc].parts[item.partDesc] || 0) + 1;
     });
 
     // En Sorunlu 5 Modül
@@ -152,18 +158,20 @@ export default function QualityDashboard() {
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
 
-    // En Yüksek Frekanslı 5 Kombinasyon
-    const sortedCombos = Object.entries(comboCounts)
-      .map(([key, count]) => {
-        const [module, part] = key.split(" | ");
-        return { module, part, count };
+    // En Sorunlu 10 Ürün (SSH MAMÜL TANIM)
+    const sortedProducts = Object.entries(productStats)
+      .map(([product, stats]) => {
+        const sortedParts = Object.entries(stats.parts)
+          .map(([part, count]) => ({ part, count }))
+          .sort((a, b) => b.count - a.count);
+        return { product, count: stats.count, parts: sortedParts };
       })
       .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+      .slice(0, 10);
 
     setTopModules(sortedModules);
     setTopParts(sortedParts);
-    setTopCombos(sortedCombos);
+    setTopProducts(sortedProducts);
     setIsLoaded(true);
   };
 
@@ -173,6 +181,7 @@ export default function QualityDashboard() {
     setIsDragging(false);
     const file = e.dataTransfer.files[0];
     if (file && (file.name.endsWith(".xlsx") || file.name.endsWith(".xls"))) {
+      setReportTitle(file.name.replace(/\.[^/.]+$/, ""));
       readFile(file);
     } else {
       alert("Lütfen geçerli bir Excel dosyası (.xlsx veya .xls) yükleyin.");
@@ -181,7 +190,10 @@ export default function QualityDashboard() {
 
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) readFile(file);
+    if (file) {
+      setReportTitle(file.name.replace(/\.[^/.]+$/, ""));
+      readFile(file);
+    }
   }, []);
 
   const readFile = (file: File) => {
@@ -199,64 +211,111 @@ export default function QualityDashboard() {
     setTotalRecords(0);
     setTopModules([]);
     setTopParts([]);
-    setTopCombos([]);
+    setTopProducts([]);
+    setExpandedProduct(null);
   };
 
   const exportToPDF = async () => {
     if (!dashboardRef.current) return;
+    setIsGeneratingPdf(true);
+    
+    // UI thread'in donmasını engellemek için React state'inin güncellenmesini bekliyoruz
+    await new Promise(resolve => setTimeout(resolve, 150));
     
     try {
       const el = dashboardRef.current;
       
-      // Elemanın ekrandaki GERÇEK genişliği ve tüm yüksekliğini (scroll dahil) alıyoruz.
-      // Bu sayede sağda boşluk kalması veya içeriklerin kayması tamamen engellenir.
       const targetWidth = el.offsetWidth;
       const targetHeight = el.scrollHeight;
       
-      const dataUrl = await htmlToImage.toPng(el, {
-        quality: 1,
+      const dataUrl = await htmlToImage.toJpeg(el, {
+        quality: 0.85,
         backgroundColor: "#fef2f2",
-        pixelRatio: 2,
+        pixelRatio: 1.5,
         width: targetWidth, 
         height: targetHeight,
         style: {
           margin: "0",
           transform: "none",
-          borderRadius: "0" // Tam kağıt hissi için oval kenarları kaldırıyoruz
+          borderRadius: "0" 
         }
       });
       
-      // Dikey (Portrait) A4 oluşturuyoruz
-      const pdf = new jsPDF("p", "mm", "a4");
+      // A4 Yatay (Landscape) olarak oluşturuluyor (Sunum için mükemmel uyum)
+      const pdf = new jsPDF("l", "mm", "a4");
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
       
-      // 1. ADIM: A4 Kağıdının TAMAMINI sitenin arka plan rengine (red-50) boyuyoruz.
-      // Böylece kağıdın neresinde boşluk kalırsa kalsın sayfa bir bütün görünecek.
-      pdf.setFillColor(254, 242, 242); // #fef2f2
+      pdf.setFillColor(254, 242, 242); 
       pdf.rect(0, 0, pageWidth, pageHeight, "F");
       
       const imgProps = pdf.getImageProperties(dataUrl);
       
-      // 2. ADIM: Resmi sıfıra sıfır A4'e sığdıracak şekilde hesaplıyoruz
       let imgWidth = pageWidth;
       let imgHeight = (imgProps.height * imgWidth) / imgProps.width;
       
-      // Eğer sayfa yüksekliğini aşıyorsa yüksekliğe göre sığdır
       if (imgHeight > pageHeight) {
         imgHeight = pageHeight;
         imgWidth = (imgProps.width * imgHeight) / imgProps.height;
       }
       
-      // 3. ADIM: Kağıdın tam merkezine resmi yerleştiriyoruz
       const x = (pageWidth - imgWidth) / 2;
       const y = (pageHeight - imgHeight) / 2;
       
-      pdf.addImage(dataUrl, "PNG", x, y, imgWidth, imgHeight);
+      pdf.addImage(dataUrl, "JPEG", x, y, imgWidth, imgHeight, undefined, 'FAST');
+
+      // --- İKİNCİ VE SONRAKİ SAYFALAR (Her ürün için ayrı detay sayfası) ---
+      for (let i = 0; i < topProducts.length; i++) {
+        const elDetails = document.getElementById(`pdf-page-prod-${i}`);
+        if (!elDetails) continue;
+
+        const targetWidth2 = elDetails.offsetWidth;
+        const targetHeight2 = elDetails.scrollHeight;
+
+        const dataUrl2 = await htmlToImage.toJpeg(elDetails, {
+          quality: 0.85,
+          backgroundColor: "#fef2f2",
+          pixelRatio: 1.5,
+          width: targetWidth2, 
+          height: targetHeight2,
+          style: {
+            margin: "0",
+            transform: "none",
+            borderRadius: "0" 
+          }
+        });
+
+        pdf.addPage();
+        pdf.setFillColor(254, 242, 242);
+        pdf.rect(0, 0, pageWidth, pageHeight, "F");
+
+        const imgProps2 = pdf.getImageProperties(dataUrl2);
+        let imgWidth2 = pageWidth;
+        let imgHeight2 = (imgProps2.height * imgWidth2) / imgProps2.width;
+        
+        if (imgHeight2 > pageHeight) {
+          imgHeight2 = pageHeight;
+          imgWidth2 = (imgProps2.width * imgHeight2) / imgProps2.height;
+        }
+        
+        let y2 = 0;
+        if (imgHeight2 < pageHeight) {
+           y2 = (pageHeight - imgHeight2) / 2;
+        }
+        const x2 = (pageWidth - imgWidth2) / 2;
+
+        pdf.addImage(dataUrl2, "JPEG", x2, y2, imgWidth2, imgHeight2, undefined, 'FAST');
+        
+        // Her sayfadan sonra kısa bir bekleme ekliyoruz ki tarayıcı donmasın
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+
       pdf.save("kalite-raporu.pdf");
     } catch (error: any) {
       console.error("PDF oluşturulurken hata:", error);
       alert("PDF oluşturulurken bir hata oluştu: " + error.message);
+    } finally {
+      setIsGeneratingPdf(false);
     }
   };
 
@@ -450,10 +509,11 @@ export default function QualityDashboard() {
                 <div className="flex items-center space-x-4 shrink-0">
                   <button
                     onClick={exportToPDF}
-                    className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-xl transition-all shadow-md font-bold shadow-red-900/20"
+                    disabled={isGeneratingPdf}
+                    className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 disabled:bg-red-300 text-white px-6 py-3 rounded-xl transition-all shadow-md font-bold shadow-red-900/20"
                   >
                     <Download size={20} />
-                    <span>PDF Olarak Çıktı Al</span>
+                    <span>{isGeneratingPdf ? "Oluşturuluyor..." : "PDF Olarak Çıktı Al"}</span>
                   </button>
                   <button
                     onClick={resetDashboard}
@@ -465,6 +525,61 @@ export default function QualityDashboard() {
                 </div>
               )}
             </div>
+
+            {/* HER ÜRÜN İÇİN AYRI SAYFA GİZLİ RENDER ALANI (PDF'TE ÇIKACAK) */}
+            {isLoaded && (
+              <div style={{ position: "absolute", width: 0, height: 0, overflow: "hidden" }}>
+                {topProducts.map((prod, index) => (
+                  <div key={index} id={`pdf-page-prod-${index}`} style={{ width: "1600px", height: "1131px", backgroundColor: "#fef2f2" }} className="p-12 font-sans flex flex-col border-4 border-red-50">
+                    <div className="text-center mb-8 border-b-2 border-red-200 pb-6 shrink-0">
+                      <h1 className="text-5xl font-black tracking-tight mb-4 text-red-900">{reportTitle || "Fabrika Kalite Dashboard"}</h1>
+                      <p className="text-slate-500 text-3xl font-medium">En Çok Hata Veren 10 Ürün (SSH Mamül Tanım) - #{index + 1}</p>
+                    </div>
+
+                    <div className="flex-1 flex flex-col space-y-8 overflow-hidden">
+                      {/* Üst Kısım: Tablo */}
+                      <div className="bg-white rounded-3xl border border-red-100 shadow-xl overflow-hidden shrink-0">
+                        <div className="p-8 bg-gradient-to-r from-red-600 to-red-800 text-white flex justify-between items-center">
+                          <div className="flex items-center space-x-6">
+                            <span className="text-5xl font-black text-red-200 opacity-50">#{index + 1}</span>
+                            <h2 className="text-4xl font-bold leading-tight max-w-4xl truncate">{prod.product}</h2>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-red-200 text-lg uppercase tracking-widest block mb-1">Toplam Arıza</span>
+                            <span className="text-5xl font-black">{prod.count}</span>
+                          </div>
+                        </div>
+                        <div className="max-h-[500px] overflow-hidden">
+                          <table className="w-full text-left border-collapse">
+                            <thead className="bg-slate-50">
+                              <tr className="text-slate-500 text-lg uppercase tracking-widest border-b-2 border-slate-200">
+                                <th className="p-6 font-bold">Arızalı Parça Adı (Malzeme Kısa Metni)</th>
+                                <th className="p-6 font-bold text-right w-64">Hata Sayısı</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {prod.parts.map((p, i) => (
+                                <tr key={i} className="bg-white">
+                                  <td className="p-6 text-2xl text-slate-800 font-medium max-w-3xl truncate" title={p.part}>{p.part}</td>
+                                  <td className="p-6 text-right">
+                                    <span className="inline-flex items-center justify-center px-5 py-2 rounded-xl bg-red-100 text-red-700 font-black text-2xl border border-red-200">
+                                      {p.count}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Alt Kısım: Görsel Eklemek İçin Boş Alan */}
+                      <div className="flex-1 bg-transparent"></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* PDF İÇERİK ALANI KAPSAYICISI */}
             <div className="max-w-7xl mx-auto">
@@ -559,8 +674,8 @@ export default function QualityDashboard() {
                           <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={topModules} margin={{ top: 20, right: 30, left: -20, bottom: 5 }}>
                               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                              <XAxis dataKey="name" stroke="#64748b" tick={{ fill: "#64748b", fontSize: 13 }} tickLine={false} axisLine={false} />
-                              <YAxis stroke="#64748b" tick={{ fill: "#64748b", fontSize: 13 }} tickLine={false} axisLine={false} />
+                              <XAxis dataKey="name" stroke="#000000" tick={{ fill: "#000000", fontSize: 15, fontWeight: "bold" }} tickLine={false} axisLine={false} />
+                              <YAxis stroke="#000000" tick={{ fill: "#000000", fontSize: 15, fontWeight: "bold" }} tickLine={false} axisLine={false} />
                               <Tooltip
                                 cursor={{ fill: "#f1f5f9", opacity: 0.4 }}
                                 contentStyle={{ backgroundColor: "#ffffff", borderColor: "#fecaca", color: "#0f172a", borderRadius: "0.75rem", padding: "12px", fontWeight: "bold" }}
@@ -570,6 +685,7 @@ export default function QualityDashboard() {
                                 {topModules.map((entry, index) => (
                                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                                 ))}
+                                <LabelList dataKey="count" position="top" fill="#000000" fontSize={20} fontWeight="900" />
                               </Bar>
                             </BarChart>
                           </ResponsiveContainer>
@@ -592,6 +708,15 @@ export default function QualityDashboard() {
                                 dataKey="count"
                                 stroke="none"
                                 animationDuration={1500}
+                                label={(props) => {
+                                  const { x, y, value } = props;
+                                  return (
+                                    <text x={x} y={y} fill="#000000" fontSize={20} fontWeight="900" textAnchor="middle" dominantBaseline="central">
+                                      {value}
+                                    </text>
+                                  );
+                                }}
+                                labelLine={{ stroke: "#000000", strokeWidth: 2 }}
                               >
                                 {topParts.map((entry, index) => (
                                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
@@ -610,34 +735,59 @@ export default function QualityDashboard() {
                       </div>
                     </div>
 
-                    {/* ÇAPRAZ KOMBİNASYON TABLOSU */}
+                    {/* EN ÇOK SORUN ÇIKARAN 10 ÜRÜN (SSH MAMÜL TANIM) TABLOSU */}
                     <div className="bg-white rounded-2xl border border-red-100 shadow-xl shadow-red-100/50 overflow-hidden">
                       <div className="p-8 border-b border-red-100 bg-red-50/50">
-                        <h3 className="text-2xl font-bold text-slate-900">Çapraz Analiz: En Çok Sorun Çıkaran Modül & Parça Eşleşmeleri</h3>
-                        <p className="text-slate-500 mt-2">Hangi ürünün, hangi parçasında en çok sorun çıkıyor?</p>
+                        <h3 className="text-2xl font-bold text-slate-900">En Çok Hata Veren 10 Ürün (SSH Mamül Tanım)</h3>
+                        <p className="text-slate-500 mt-2">En sık arıza kaydı açılan ürünler ve bu ürünlerde bozulan parçaların detayı. (İncelemek için ürünün üzerine tıklayın)</p>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse">
                           <thead className="bg-red-50/80">
                             <tr className="text-red-800 text-sm uppercase tracking-widest border-b border-red-100">
                               <th className="p-6 font-bold w-24">Sıra</th>
-                              <th className="p-6 font-bold">Modül Adı</th>
-                              <th className="p-6 font-bold">Parça Adı (Malzeme Kısa Metni)</th>
-                              <th className="p-6 font-bold text-right">Hata Sayısı</th>
+                              <th className="p-6 font-bold">Ürün Adı (SSH Mamül Tanım)</th>
+                              <th className="p-6 font-bold text-right">Toplam Hata</th>
+                              <th className="p-6 font-bold text-center w-24">Detay</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-red-50">
-                            {topCombos.map((combo, index) => (
-                              <tr key={index} className="hover:bg-red-50 transition-colors group">
-                                <td className="p-6 font-bold text-slate-400 group-hover:text-red-500 transition-colors">#{index + 1}</td>
-                                <td className="p-6 font-bold text-xl text-slate-800">{combo.module}</td>
-                                <td className="p-6 text-lg text-slate-600">{combo.part}</td>
-                                <td className="p-6 text-right">
-                                  <span className="inline-flex items-center justify-center px-4 py-1.5 rounded-full bg-red-100 text-red-700 font-black text-2xl border border-red-200">
-                                    {combo.count}
-                                  </span>
-                                </td>
-                              </tr>
+                            {topProducts.map((prod, index) => (
+                              <React.Fragment key={index}>
+                                <tr 
+                                  onClick={() => setExpandedProduct(expandedProduct === prod.product ? null : prod.product)}
+                                  className="hover:bg-red-50 transition-colors group cursor-pointer"
+                                >
+                                  <td className="p-6 font-bold text-slate-400 group-hover:text-red-500 transition-colors">#{index + 1}</td>
+                                  <td className="p-6 font-bold text-xl text-slate-800">{prod.product}</td>
+                                  <td className="p-6 text-right">
+                                    <span className="inline-flex items-center justify-center px-4 py-1.5 rounded-full bg-red-100 text-red-700 font-black text-2xl border border-red-200">
+                                      {prod.count}
+                                    </span>
+                                  </td>
+                                  <td className="p-6 text-center text-slate-400 group-hover:text-red-500">
+                                    {expandedProduct === prod.product ? <ChevronUp className="inline-block" /> : <ChevronDown className="inline-block" />}
+                                  </td>
+                                </tr>
+                                {/* Expanded Row for Parts Details */}
+                                {expandedProduct === prod.product && (
+                                  <tr className="bg-slate-50/50">
+                                    <td colSpan={4} className="p-0 border-b-2 border-red-100">
+                                      <div className="p-6 pl-24 pr-16 bg-gradient-to-r from-red-50/20 to-transparent">
+                                        <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Bu Üründeki Parça Arızaları</h4>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2">
+                                          {prod.parts.map((p, i) => (
+                                            <div key={i} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
+                                              <span className="text-slate-700 font-medium">{p.part}</span>
+                                              <span className="font-bold text-red-600 bg-red-100/50 px-2.5 py-0.5 rounded-md text-sm">{p.count} adet</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
                             ))}
                           </tbody>
                         </table>
